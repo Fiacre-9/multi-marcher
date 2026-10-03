@@ -110,8 +110,16 @@ app.use((q, s, n) => {
   n();
 });
 /* --- PWA / Google Play --- */
-app.get('/sw.js', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/', 'Content-Type': 'text/javascript; charset=utf-8' }); s.sendFile(path.join(__dirname, 'public', 'sw.js')); });
-app.get('/manifest.webmanifest', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Content-Type': 'application/manifest+json; charset=utf-8' }); s.sendFile(path.join(__dirname, 'public', 'manifest.webmanifest')); });
+/* Dossier des fichiers web : « public/ » si présent, sinon structure à plat (fichiers à la racine du dépôt). */
+const HAS_PUBLIC = fs.existsSync(path.join(__dirname, 'public', 'index.html'));
+const FLAT_OK = new Set(['index.html', 'app.js', 'style.css', 'sw.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'maskable-512.png', 'apple-touch-icon.png', 'favicon-32.png', 'play-store-512.png']);
+const webFile = (name) => {
+  if (HAS_PUBLIC) return path.join(__dirname, 'public', name);
+  const flat = name.replace(/^icons\//, '');
+  return FLAT_OK.has(flat) ? path.join(__dirname, flat) : null;
+};
+app.get('/sw.js', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/', 'Content-Type': 'text/javascript; charset=utf-8' }); s.sendFile(webFile('sw.js')); });
+app.get('/manifest.webmanifest', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Content-Type': 'application/manifest+json; charset=utf-8' }); s.sendFile(webFile('manifest.webmanifest')); });
 const legal = require('./legal')(process.env.CONTACT_EMAIL || '');
 app.get('/confidentialite', (q, s) => s.type('html').send(legal.privacy));
 app.get('/suppression-compte', (q, s) => s.type('html').send(legal.del));
@@ -123,7 +131,14 @@ app.get('/.well-known/assetlinks.json', (q, s) => {
   s.json(fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: process.env.ANDROID_PACKAGE || 'online.mireb.boutiques', sha256_cert_fingerprints: fp } }] : []);
 });
 app.use('/uploads', express.static(UP, { maxAge: '7d', index: false }));
-app.use(express.static(path.join(__dirname, 'public')));
+if (HAS_PUBLIC) app.use(express.static(path.join(__dirname, 'public')));
+else {
+  app.get(['/', '/index.html', '/app.js', '/style.css', '/icons/:f', '/:f(icon-192.png|icon-512.png|maskable-512.png|apple-touch-icon.png|favicon-32.png)'], (q, s, n) => {
+    const name = q.params.f ? (q.path.startsWith('/icons/') ? 'icons/' + q.params.f : q.params.f) : (q.path === '/' ? 'index.html' : q.path.slice(1));
+    const f = webFile(name);
+    f && fs.existsSync(f) ? s.sendFile(f) : n();
+  });
+}
 
 /* limiteur de tentatives de connexion */
 const tries = new Map();
@@ -192,6 +207,174 @@ app.post('/api/login', (q, s) => {
   s.json({ token: sign({ id: u.id, exp: Date.now() + 14 * 864e5 }) });
 });
 route('post', '/api/me/password', null, (q) => {
+  if (!checkPw(String(q.body.old || ''), q.u.hash)) bad('Ancien mot de passe incorrect');
+  if (String(q.body.password || '').length < 6) bad('Mot de passe : 6 caractères minimum');
+  q.u.hash = hashPw(q.body.password);
+  save();
+  return { ok: true };
+});
+
+/* ---------- données du tableau de bord ---------- */
+route('get', '/api/data', null, (q) => {
+  const u = q.u;
+  const shops = shopsOf(u);
+  const ids = new Set(shops.map((s) => s.id));
+  const vend = u.role === 'vendeur';
+  const products = db.products.filter((p) => prodOk(u, p)).map((p) => (vend ? { ...p, costUSD: undefined } : p));
+  const stock = {};
+  for (const k in db.stock) if (ids.has(k.split('|')[0])) stock[k] = db.stock[k];
+  let users = [];
+  if (u.role === 'superadmin') users = db.users.filter((x) => x.id !== u.id);
+  else if (u.role === 'patron') users = db.users.filter((x) => x.patronId === u.id);
+  else if (u.role === 'gerant') users = db.users.filter((x) => x.role === 'vendeur' && (x.shopIds || []).some((s) => ids.has(s)));
+  let sales = db.sales.filter((x) => ids.has(x.shopId));
+  if (vend) sales = sales.filter((x) => x.date === day());
+  const money = !vend && u.role !== 'agent';
+  const pid = u.role === 'patron' ? u.id : u.patronId;
+  const out = {
+    me: pub(u), rate: db.settings.rate, today: day(), shops, products, stock, users: users.map(pub),
+    sales: money ? sales.slice(-800) : vend ? sales.slice(-60).map(({ costUSD, ...r }) => r) : [],
+    purchases: money ? db.purchases.filter((x) => ids.has(x.shopId)).slice(-300) : [],
+    comments: u.role === 'agent' ? [] : db.comments.filter((x) => ids.has(x.shopId)).slice(-200),
+    tasks: db.tasks.filter((t) => (u.role === 'superadmin' ? true : t.patronId === pid)),
+    done: Object.keys(db.taskDone).filter((k) => k.startsWith(u.id + '|' + day())).map((k) => k.split('|')[2]),
+    patrons: u.role === 'superadmin' ? db.users.filter((x) => x.role === 'patron').map(pub) : [],
+    deals: u.role === 'superadmin' ? db.deals : u.role === 'agent' ? db.deals.filter((d) => d.agentId === u.id) : [],
+    commissions: {},
+  };
+  if (u.role === 'superadmin') db.users.filter((x) => x.role === 'agent').forEach((a) => (out.commissions[a.id] = commission(a)));
+  if (u.role === 'agent') out.commissions[u.id] = commission(u);
+  return out;
+});
+
+/* ---------- taux de change ---------- */
+route('put', '/api/rate', ['superadmin', 'patron'], (q) => {
+  const r = num(q.body.rate);
+  if (r < 100 || r > 100000) bad('Taux invalide (CDF pour 1 USD)');
+  db.settings.rate = r;
+  save();
+  return { ok: true };
+});
+
+/* ---------- utilisateurs ---------- */
+function mkUser(creator, b, shopIds, patronId) {
+  const role = str(b.role, 10);
+  const allowed = { superadmin: ['patron', 'gerant', 'vendeur', 'agent'], patron: ['gerant', 'vendeur'], gerant: ['vendeur'] }[creator.role] || [];
+  if (!allowed.includes(role)) bad('Rôle non autorisé', 403);
+  const username = str(b.username, 30).toLowerCase();
+  if (!/^[a-z0-9._-]{3,30}$/.test(username)) bad('Identifiant : 3 à 30 caractères (lettres, chiffres, . _ -)');
+  if (db.users.some((x) => x.username === username)) bad('Cet identifiant existe déjà');
+  if (String(b.password || '').length < 6) bad('Mot de passe : 6 caractères minimum');
+  if (!str(b.name)) bad('Nom requis');
+  return { id: uid(), name: str(b.name), username, hash: hashPw(String(b.password)), role, patronId: role === 'patron' || role === 'agent' ? undefined : patronId, shopIds, active: true, ts: Date.now() };
+}
+route('post', '/api/users', ['superadmin', 'patron', 'gerant'], (q) => {
+  const b = q.body, u = q.u;
+  const mine = shopsOf(u).map((s) => s.id);
+  const shopIds = (Array.isArray(b.shopIds) ? b.shopIds : []).filter((x) => mine.includes(x));
+  let patronId = u.role === 'patron' ? u.id : u.role === 'gerant' ? u.patronId : str(b.patronId, 20);
+  if (b.role === 'vendeur' && !shopIds.length) bad('Choisissez une boutique pour le vendeur');
+  if (['gerant', 'vendeur'].includes(b.role) && u.role === 'superadmin') {
+    const sh = db.shops.find((s) => s.id === shopIds[0]);
+    patronId = sh ? sh.patronId : patronId;
+    if (!db.users.some((x) => x.id === patronId && x.role === 'patron')) bad('Choisissez un patron ou une boutique');
+  }
+  if (b.role === 'vendeur' && u.role === 'gerant' && shopIds.length > 1) shopIds.length = 1;
+  const nu = mkUser(u, b, shopIds, patronId);
+  db.users.push(nu);
+  save();
+  return pub(nu);
+});
+route('put', '/api/users/:id', ['superadmin', 'patron', 'gerant'], (q) => {
+  const t = db.users.find((x) => x.id === q.params.id) || bad('Introuvable', 404);
+  if (!manages(q.u, t)) bad('Accès refusé', 403);
+  const b = q.body;
+  if (b.name !== undefined) t.name = str(b.name) || t.name;
+  if (b.active !== undefined) t.active = !!b.active;
+  if (Array.isArray(b.shopIds)) {
+    const mine = shopsOf(q.u).map((s) => s.id);
+    t.shopIds = b.shopIds.filter((x) => mine.includes(x));
+  }
+  if (b.password) {
+    if (String(b.password).length < 6) bad('Mot de passe : 6 caractères minimum');
+    t.hash = hashPw(String(b.password));
+  }
+  save();
+  return pub(t);
+});
+route('delete', '/api/users/:id', ['superadmin', 'patron', 'gerant'], (q) => {
+  const t = db.users.find((x) => x.id === q.params.id) || bad('Introuvable', 404);
+  if (!manages(q.u, t)) bad('Accès refusé', 403);
+  db.users = db.users.filter((x) => x.id !== t.id);
+  if (t.role === 'patron') {
+    const sids = db.shops.filter((s) => s.patronId === t.id).map((s) => s.id);
+    db.users = db.users.filter((x) => x.patronId !== t.id);
+    db.shops = db.shops.filter((s) => s.patronId !== t.id);
+    db.products = db.products.filter((p) => p.patronId !== t.id);
+    db.sales = db.sales.filter((x) => !sids.includes(x.shopId));
+    db.purchases = db.purchases.filter((x) => !sids.includes(x.shopId));
+    db.comments = db.comments.filter((x) => !sids.includes(x.shopId));
+    db.tasks = db.tasks.filter((x) => x.patronId !== t.id);
+    for (const k in db.stock) if (sids.includes(k.split('|')[0])) delete db.stock[k];
+  }
+  save();
+  return { ok: true };
+});
+
+/* ---------- boutiques ---------- */
+route('post', '/api/shops', ['superadmin', 'patron', 'gerant'], (q) => {
+  const b = q.body, u = q.u;
+  const patronId = u.role === 'patron' ? u.id : u.role === 'gerant' ? u.patronId : str(b.patronId, 20);
+  if (!db.users.some((x) => x.id === patronId && x.role === 'patron')) bad('Patron introuvable');
+  if (!str(b.name)) bad('Nom de la boutique requis');
+  const sh = { id: uid(), patronId, name: str(b.name), addr: str(b.addr, 200), zone: str(b.zone, 80), ts: Date.now() };
+  let seller = null;
+  if (b.seller && (b.seller.username || b.seller.name)) {
+    seller = mkUser({ role: 'superadmin' }, { ...b.seller, role: 'vendeur' }, [sh.id], patronId);
+  }
+  db.shops.push(sh);
+  if (seller) db.users.push(seller);
+  if (u.role === 'gerant') u.shopIds = [...(u.shopIds || []), sh.id];
+  save();
+  return sh;
+});
+route('put', '/api/shops/:id', ['superadmin', 'patron', 'gerant'], (q) => {
+  const sh = shopOk(q.u, q.params.id);
+  ['name', 'addr', 'zone'].forEach((k) => { if (q.body[k] !== undefined) sh[k] = str(q.body[k], k === 'addr' ? 200 : 80) || sh[k]; });
+  save();
+  return sh;
+});
+route('delete', '/api/shops/:id', ['superadmin', 'patron'], (q) => {
+  const sh = shopOk(q.u, q.params.id);
+  db.shops = db.shops.filter((s) => s.id !== sh.id);
+  db.users.forEach((x) => { if (x.shopIds) x.shopIds = x.shopIds.filter((i) => i !== sh.id); });
+  for (const k in db.stock) if (k.startsWith(sh.id + '|')) delete db.stock[k];
+  save();
+  return { ok: true };
+});
+
+/* ---------- images produits ---------- */
+route('post', '/api/upload', ['superadmin', 'patron', 'gerant', 'agent'], (q) => {
+  const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(q.body.data || ''));
+  if (!m) bad('Image invalide');
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 2.5 * 1024 * 1024) bad('Image trop lourde (2,5 Mo max)');
+  const ok = (m[1] === 'jpeg' && buf[0] === 0xff && buf[1] === 0xd8) || (m[1] === 'png' && buf.slice(1, 4).toString() === 'PNG') || (m[1] === 'webp' && buf.slice(0, 4).toString() === 'RIFF');
+  if (!ok) bad('Fichier image invalide');
+  const name = uid() + crypto.randomBytes(3).toString('hex') + '.' + (m[1] === 'jpeg' ? 'jpg' : m[1]);
+  fs.writeFileSync(path.join(UP, name), buf);
+  return { url: '/uploads/' + name };
+});
+
+/* ---------- produits ---------- */
+function prodFields(b) {
+  const d = b.detail && b.detail.unit && num(b.detail.parts) > 0 ? { unit: str(b.detail.unit, 20), parts: num(b.detail.parts), priceUSD: round(num(b.detail.priceUSD)) } : null;
+  const img = String(b.image || '');
+  return { name: str(b.name), image: /^\/uploads\/[\w.]+$/.test(img) ? img : '', costUSD: round(num(b.costUSD)), wholeUSD: round(num(b.wholeUSD)), priceUSD: round(num(b.priceUSD)), detail: d, alertQty: num(b.alertQty) || 3 };
+}
+route('post', '/api/products', ['superadmin', 'patron', 'gerant', 'agent'], (q) => {
+  const b = q.body, u = q.u;
+  if (!str(b.name)) bad('Nom du produ', null, (q) => {
   if (!checkPw(String(q.body.old || ''), q.u.hash)) bad('Ancien mot de passe incorrect');
   if (String(q.body.password || '').length < 6) bad('Mot de passe : 6 caractères minimum');
   q.u.hash = hashPw(q.body.password);
