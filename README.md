@@ -22,5 +22,10 @@ Voir `.env.example`. Les plus importantes : `ADMIN_PASSWORD`, `SESSION_SECRET`, 
 - Fichier d'entrée : `server.js` · Commande de démarrage : `npm start` · Node 18+
 - Définir les variables d'environnement, puis lancer le build/déploiement.
 
+## Application installable (PWA) et Google Play
+Manifeste, service worker, icônes, pages `/confidentialite` et `/suppression-compte`, et `/.well-known/assetlinks.json`
+(variables `ANDROID_PACKAGE`, `ANDROID_SHA256`, `CONTACT_EMAIL`). Guide complet : [ANDROID.md](ANDROID.md).
+Régénérer les icônes : `python3 tools/make-icons.py` · visuels du store : `python3 tools/store-assets.py`.
+
 ## Commissions agents
 20 % de la valeur d'un marché boutique gagné + 0,10 $ par produit ajouté.

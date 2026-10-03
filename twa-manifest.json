@@ -1,0 +1,23 @@
+{
+  "packageId": "online.mireb.boutiques",
+  "host": "boutiques.mireb.online",
+  "name": "BoutiquePro – Gestion de boutiques",
+  "launcherName": "BoutiquePro",
+  "display": "standalone",
+  "orientation": "portrait",
+  "themeColor": "#0d9488",
+  "navigationColor": "#0d9488",
+  "backgroundColor": "#f3f6f8",
+  "startUrl": "/?source=twa",
+  "iconUrl": "https://boutiques.mireb.online/icons/icon-512.png",
+  "maskableIconUrl": "https://boutiques.mireb.online/icons/maskable-512.png",
+  "webManifestUrl": "https://boutiques.mireb.online/manifest.webmanifest",
+  "fullScopeUrl": "https://boutiques.mireb.online/",
+  "appVersion": "1.0.0",
+  "appVersionCode": 1,
+  "minSdkVersion": 21,
+  "enableNotifications": false,
+  "splashScreenFadeOutDuration": 300,
+  "fallbackType": "customtabs",
+  "signingKey": { "path": "./android.keystore", "alias": "boutiquepro" }
+}

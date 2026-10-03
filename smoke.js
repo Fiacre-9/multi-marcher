@@ -4,7 +4,7 @@ const { spawn } = require('child_process');
 const fs = require('fs'), os = require('os'), path = require('path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-'));
 const PORT = 3999, B = 'http://localhost:' + PORT;
-const srv = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, ADMIN_PASSWORD: 'Admin#2026' }, stdio: 'ignore' });
+const srv = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, ADMIN_PASSWORD: 'Admin#2026', ANDROID_SHA256: '' }, stdio: 'ignore' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fail = 0;
 const ok = (c, m) => { console.log((c ? '  ✔ ' : '  ✘ ') + m); if (!c) fail++; };
@@ -69,6 +69,15 @@ const login = async (u, p) => (await call('', 'POST', '/login', { username: u, p
     ok((await call(P, 'DELETE', '/users/' + ger.id)).s === 200, 'patron supprime un gérant');
     ok((await call(G, 'GET', '/data')).s === 401, 'compte supprimé = accès coupé');
     ok((await call(P, 'PUT', '/rate', { rate: 2850 })).s === 200 && (await call(P, 'GET', '/data')).j.rate === 2850, 'taux de change modifiable');
+    const get = async (u) => { const r = await fetch(B + u); return { s: r.status, t: await r.text(), h: r.headers }; };
+    const man = await get('/manifest.webmanifest');
+    ok(man.s === 200 && JSON.parse(man.t).display === 'standalone', 'manifeste PWA servi');
+    const sw = await get('/sw.js');
+    ok(sw.s === 200 && /no-cache/.test(sw.h.get('cache-control')) && sw.h.get('service-worker-allowed') === '/', 'service worker servi sans cache');
+    ok((await get('/icons/maskable-512.png')).s === 200, 'icône maskable servie');
+    ok((await get('/confidentialite')).t.includes('Politique de confidentialité'), 'page de confidentialité');
+    ok((await get('/suppression-compte')).t.includes('Supprimer un compte'), 'page de suppression de compte');
+    ok((await get('/.well-known/assetlinks.json')).t.trim() === '[]', 'assetlinks vide tant qu\'aucune empreinte n\'est configurée');
   } catch (e) { console.error(e); fail++; }
   srv.kill();
   fs.rmSync(dir, { recursive: true, force: true });

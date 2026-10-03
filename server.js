@@ -109,6 +109,19 @@ app.use((q, s, n) => {
   s.setHeader('Referrer-Policy', 'same-origin');
   n();
 });
+/* --- PWA / Google Play --- */
+app.get('/sw.js', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/', 'Content-Type': 'text/javascript; charset=utf-8' }); s.sendFile(path.join(__dirname, 'public', 'sw.js')); });
+app.get('/manifest.webmanifest', (q, s) => { s.set({ 'Cache-Control': 'no-cache', 'Content-Type': 'application/manifest+json; charset=utf-8' }); s.sendFile(path.join(__dirname, 'public', 'manifest.webmanifest')); });
+const legal = require('./legal')(process.env.CONTACT_EMAIL || '');
+app.get('/confidentialite', (q, s) => s.type('html').send(legal.privacy));
+app.get('/suppression-compte', (q, s) => s.type('html').send(legal.del));
+/* Digital Asset Links : lie le site à l'application Android (Trusted Web Activity).
+   ANDROID_PACKAGE = identifiant du paquet ; ANDROID_SHA256 = empreintes SHA-256 de signature, séparées par des virgules. */
+app.get('/.well-known/assetlinks.json', (q, s) => {
+  const fp = (process.env.ANDROID_SHA256 || '').split(',').map((x) => x.trim().toUpperCase()).filter((x) => /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(x));
+  s.set('Cache-Control', 'no-cache');
+  s.json(fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: process.env.ANDROID_PACKAGE || 'online.mireb.boutiques', sha256_cert_fingerprints: fp } }] : []);
+});
 app.use('/uploads', express.static(UP, { maxAge: '7d', index: false }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -283,6 +296,10 @@ route('delete', '/api/users/:id', ['superadmin', 'patron', 'gerant'], (q) => {
     db.users = db.users.filter((x) => x.patronId !== t.id);
     db.shops = db.shops.filter((s) => s.patronId !== t.id);
     db.products = db.products.filter((p) => p.patronId !== t.id);
+    db.sales = db.sales.filter((x) => !sids.includes(x.shopId));
+    db.purchases = db.purchases.filter((x) => !sids.includes(x.shopId));
+    db.comments = db.comments.filter((x) => !sids.includes(x.shopId));
+    db.tasks = db.tasks.filter((x) => x.patronId !== t.id);
     for (const k in db.stock) if (sids.includes(k.split('|')[0])) delete db.stock[k];
   }
   save();

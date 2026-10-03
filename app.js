@@ -55,7 +55,11 @@ function toast(m, err) {
 }
 
 /* ---------- API ---------- */
-async function api(p, m = 'GET', b) {
+async function api(p, m, b) {
+  try { return await api0(p, m, b); }
+  catch (e) { throw e instanceof TypeError ? new Error('Pas de connexion internet') : e; }
+}
+async function api0(p, m = 'GET', b) {
   const r = await fetch('/api' + p, {
     method: m,
     headers: { 'Content-Type': 'application/json', ...(S.token ? { Authorization: 'Bearer ' + S.token } : {}) },
@@ -90,6 +94,7 @@ function render() {
   root.innerHTML = `
   <header>
     <div class="brand"><div class="logo">🏪</div><span>BoutiquePro</span></div><div class="sp"></div>
+    ${S.install ? '<button class="btn s noprint" data-a="install">📲 Installer</button>' : ''}
     <div class="seg noprint"><button data-a="cur" data-v="USD" class="${S.cur === 'USD' ? 'on' : ''}">USD</button><button data-a="cur" data-v="CDF" class="${S.cur === 'CDF' ? 'on' : ''}">CDF</button></div>
     <div class="who noprint"><b>${esc(me.name)}</b><span>${ROLE[me.role]} · <a href="#" data-a="pw">Mot de passe</a> · <a href="#" data-a="logout">Quitter</a></span></div>
   </header>
@@ -101,7 +106,7 @@ function loginView() {
   return `<div class="login"><form class="card" data-f="login"><div class="logo">🏪</div><h1>BoutiquePro</h1><p class="mut">Gestion de boutiques · Connexion</p>
   <label>Identifiant</label><input name="username" autocomplete="username" autocapitalize="none" required>
   <label>Mot de passe</label><input name="password" type="password" autocomplete="current-password" required>
-  <button class="btn big">Se connecter</button><div class="err" id="lerr"></div></form></div>`;
+  <button class="btn big">Se connecter</button>${S.install ? '<button type="button" class="btn o big" data-a="install">📲 Installer l\'application</button>' : ''}<div class="err" id="lerr"></div></form></div>`;
 }
 
 /* ---------- formulaires produit ---------- */
@@ -148,10 +153,10 @@ VIEWS['vendeur|Vente'] = () => {
   const list = D().products.filter((p) => !p.shopIds || p.shopIds.includes(sid));
   const ts = D().sales.filter((x) => x.date === D().today);
   const ca = ts.reduce((a, x) => a + x.totalUSD, 0);
-  return `<div class="kpis">${kpi('Boutique', esc(sh.name))}${kpi('Ventes du jour', ts.length, 'o')}${kpi('Encaissé aujourd\'hui', fm(ca), 'g')}</div>
-  <div class="card"><h2>Produits</h2><div class="search"><input placeholder="Rechercher un produit…" oninput="filt(this.value)"></div>
+  const kp = `<div class="kpis">${kpi('Boutique', esc(sh.name))}${kpi('Ventes du jour', ts.length, 'o')}${kpi('Encaissé aujourd\'hui', fm(ca), 'g')}</div>`;
+  return `<div class="card"><h2>Produits</h2><div class="search"><input placeholder="Rechercher un produit…" oninput="filt(this.value)"></div>
   ${list.length ? `<div class="grid">${list.map((p) => { const q = stk(sid, p.id); return `<div class="pt ${q <= 0 ? 'out' : ''}" data-a="sell" data-id="${p.id}" data-n="${esc(p.name.toLowerCase())}"><div class="im">${pimg(p)}<span class="badge-w">${badge(q, p).replace('class="badge', 'class="badge badge-abs')}</span></div><div class="bd"><b>${esc(p.name)}</b><div class="pr">${fm(p.priceUSD)}</div>${p.detail ? `<div class="mut">${fm(p.detail.priceUSD)} / ${esc(p.detail.unit)}</div>` : ''}</div></div>`; }).join('')}</div>` : empty('Aucun produit pour le moment.')}</div>
-  ${ts.length ? `<div class="card"><h2>Mes dernières ventes</h2>${ts.slice(-6).reverse().map((x) => `<div class="pl"><div class="t"><b>${esc((prod(x.productId) || {}).name || '?')} × ${x.qty}</b><span class="mut">${hm(x.ts)}</span></div><b>${fm(x.totalUSD)}</b></div>`).join('')}</div>` : ''}`;
+  ${ts.length ? `<div class="card"><h2>Mes dernières ventes</h2>${ts.slice(-6).reverse().map((x) => `<div class="pl"><div class="t"><b>${esc((prod(x.productId) || {}).name || '?')} × ${x.qty}</b><span class="mut">${hm(x.ts)}</span></div><b>${fm(x.totalUSD)}</b></div>`).join('')}</div>` : ''}${kp}`;
 };
 function filt(v) {
   v = v.toLowerCase();
@@ -373,6 +378,7 @@ document.addEventListener('click', async (e) => {
     if (a === 'tab') { S.tab = t.dataset.v; render(); if (S.tab === 'Rapport') loadRep(); }
     else if (a === 'cur') { S.cur = t.dataset.v; localStorage.setItem('bp_cur', S.cur); render(); }
     else if (a === 'logout') logout();
+    else if (a === 'install') { const ev = S.install; S.install = null; ev.prompt(); await ev.userChoice; render(); }
     else if (a === 'print') window.print();
     else if (a === 'mclose') modal('');
     else if (a === 'sell') sellModal(id);
@@ -446,6 +452,20 @@ setInterval(async () => {
   if (a && /INPUT|SELECT|TEXTAREA/.test(a.tagName)) return;
   try { await load(); if (S.tab === 'Rapport' && S.rep) { const r = await api('/report?' + new URLSearchParams(S.rep)); if (JSON.stringify(r) !== JSON.stringify(S.repData)) { S.repData = r; render(); } } } catch { /* silencieux */ }
 }, 8000);
+
+/* PWA : service worker, installation, état hors ligne */
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  S.install = e;
+  const a = document.activeElement;
+  if (!(a && /INPUT|SELECT|TEXTAREA/.test(a.tagName)) && !$('#modal').firstChild) render();
+});
+window.addEventListener('appinstalled', () => { S.install = null; toast('Application installée ✔'); render(); });
+const netState = () => $('#offline').classList.toggle('hide', navigator.onLine);
+window.addEventListener('online', () => { netState(); toast('Connexion rétablie'); if (S.token) load().catch(() => {}); });
+window.addEventListener('offline', netState);
+netState();
 
 /* démarrage */
 (async () => {
