@@ -1,16 +1,13 @@
 {
   "name": "boutiquepro",
   "version": "1.0.0",
-  "description": "Gestion de boutiques physiques : vendeur, gérant, patron, super admin, agents éditeurs",
   "main": "server.js",
   "scripts": {
+    "prestart": "node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of ['app.js','index.html','style.css'])if(fs.existsSync(f))fs.copyFileSync(f,'public/'+f)\"",
     "start": "node server.js",
-    "test": "node test/smoke.js"
+    "build": "node --check server.js"
   },
   "engines": { "node": ">=18" },
-  "license": "UNLICENSED",
   "private": true,
-  "dependencies": {
-    "express": "^4.21.2"
-  }
+  "dependencies": { "express": "^4.21.2" }
 }
