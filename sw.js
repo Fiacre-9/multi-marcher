@@ -1,7 +1,7 @@
 /* BoutiquePro – service worker
    - Coquille de l'application disponible hors ligne (l'écran s'ouvre même sans réseau).
    - Les appels /api ne sont JAMAIS mis en cache : les ventes et stocks restent toujours à jour et sécurisés. */
-const V = 'bp-v1';
+const V = 'bp-v2';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png', '/icons/favicon-32.png'];
 
 self.addEventListener('install', (e) => {
