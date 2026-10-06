@@ -8,7 +8,7 @@ const TABS = {
   vendeur: ['Vente', 'Tâches', 'Messages'],
   gerant: ['Tableau', 'Produits', 'Stock', 'Boutiques', 'Achats', 'Rapport', 'Tâches', 'Messages'],
   patron: ['Tableau', 'Gérants', 'Boutiques', 'Rapport', 'Tâches', 'Messages'],
-  superadmin: ['Tableau', 'Utilisateurs', 'Agents', 'Produits', 'Boutiques', 'Rapport'],
+  superadmin: ['Tableau', 'Utilisateurs', 'Agents', 'Produits', 'Boutiques'],
   agent: ['Mon espace', 'Produits'],
 };
 
@@ -93,11 +93,12 @@ async function api0(p, m = 'GET', b) {
     body: b ? JSON.stringify(b) : undefined,
   });
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401 && p !== '/login') { logout(); throw new Error('Session expirée, reconnectez-vous'); }
+  if (r.status === 401 && p !== '/login') { logout(); throw new Error(j.error || 'Session expirée, reconnectez-vous'); }
   if (!r.ok) throw new Error(j.error || 'Erreur');
   return j;
 }
 function logout() {
+  if (S.token) pushOff(S.token);
   localStorage.removeItem('bp_tok');
   Object.assign(S, { token: '', data: null, raw: '', tab: '', repData: null, cart: [], sale: null, pay: null, dirty: false });
   render();
@@ -107,8 +108,77 @@ async function load(force) {
   const raw = JSON.stringify(d);
   if (raw === S.raw && !force) return;
   S.raw = raw;
+  if (!S.data && sndOn() && 'Notification' in window && Notification.permission === 'granted') pushOn();
   S.data = d;
+  try { notifyNew(d); } catch { /* son non critique */ }
   render();
+}
+
+/* ---------- sonneries & notifications ---------- */
+let AC = null;
+const sndOn = () => localStorage.getItem('bp_snd') !== '0';
+function unlockAudio() { try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch { /* */ } }
+['click', 'keydown', 'touchstart'].forEach((e) => document.addEventListener(e, unlockAudio, { passive: true }));
+function tone(f, t0, d, vol, type) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'sine'; o.frequency.value = f;
+  g.gain.setValueAtTime(0.0001, AC.currentTime + t0);
+  g.gain.exponentialRampToValueAtTime(vol || 0.25, AC.currentTime + t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + t0 + d);
+  o.connect(g); g.connect(AC.destination); o.start(AC.currentTime + t0); o.stop(AC.currentTime + t0 + d + 0.05);
+}
+function ring(kind) {
+  if (!sndOn()) return;
+  unlockAudio();
+  if (!AC || AC.state !== 'running') return;
+  if (kind === 'sale') { tone(1318, 0, 0.18, 0.3, 'triangle'); tone(1760, 0.14, 0.18, 0.3, 'triangle'); tone(2093, 0.28, 0.45, 0.3, 'triangle'); }      // « ka-ching »
+  else if (kind === 'alert') { tone(660, 0, 0.2, 0.3, 'square'); tone(520, 0.24, 0.3, 0.3, 'square'); }
+  else { tone(880, 0, 0.18, 0.28); tone(1174, 0.2, 0.35, 0.28); }                                                                                     // notification
+  if (navigator.vibrate) navigator.vibrate(kind === 'sale' ? [80, 40, 80] : 120);
+}
+/* push : abonnement de cet appareil (fonctionne application fermée) */
+const b64 = (s) => { const p = '='.repeat((4 - (s.length % 4)) % 4), r = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from([...r].map((x) => x.charCodeAt(0))); };
+async function pushOn() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !S.token) return false;
+    if (Notification.permission === 'default') await Notification.requestPermission();
+    if (Notification.permission !== 'granted') return false;
+    const { key } = await api('/push/key');
+    if (!key) return false;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64(key) }));
+    await api('/push/sub', 'POST', { subscription: sub.toJSON() });
+    return true;
+  } catch { return false; }
+}
+async function pushOff(tok) {
+  try {
+    const reg = await navigator.serviceWorker.ready, sub = await reg.pushManager.getSubscription();
+    if (sub) { await fetch('/api/push/off', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (tok || S.token) }, body: JSON.stringify({ endpoint: sub.endpoint }) }); await sub.unsubscribe(); }
+  } catch { /* */ }
+}
+function sysNotify(title, body) {
+  try { if (document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification(title, { body, icon: '/icons/icon-192.png' }); } catch { /* */ }
+}
+function notifyNew(d) {
+  const me = d.me, ids = { s: new Set(d.sales.map((x) => x.ticket || x.id)), c: new Set(d.comments.map((x) => x.id)), t: new Set(d.tasks.map((x) => x.id)) };
+  const seen = S.seen;
+  S.seen = ids;
+  if (!seen || seen.uid !== me.id) { S.seen.uid = me.id; return; }
+  S.seen.uid = me.id;
+  let msgs = [];
+  if (['gerant', 'patron'].includes(me.role)) {
+    const n = [...ids.s].filter((x) => !seen.s.has(x)).length;
+    if (n) { msgs.push(['sale', '💰 ' + (n > 1 ? n + ' nouvelles ventes' : 'Nouvelle vente')]); }
+  }
+  const nc = d.comments.filter((x) => !seen.c.has(x.id) && x.from !== me.name);
+  if (nc.length) msgs.push([nc.some((x) => x.auto) ? 'alert' : 'msg', nc[nc.length - 1].auto ? '⚠️ ' + nc[nc.length - 1].text : '💬 ' + nc[nc.length - 1].from + ' : ' + nc[nc.length - 1].text]);
+  if (me.role !== 'patron' && [...ids.t].some((x) => !seen.t.has(x))) msgs.push(['msg', '📋 Nouvelle tâche']);
+  if (!msgs.length) return;
+  const top = msgs.find((m) => m[0] === 'sale') || msgs.find((m) => m[0] === 'alert') || msgs[0];
+  ring(top[0]);
+  toast(top[1]);
+  sysNotify('BoutiquePro', top[1]);
 }
 
 /* ---------- rendu ---------- */
@@ -122,6 +192,7 @@ function render() {
   <header>
     <div class="brand"><div class="logo">🏪</div><span>BoutiquePro</span></div><div class="sp"></div>
     ${S.install ? '<button class="btn s noprint" data-a="install">📲 Installer</button>' : ''}
+    <button class="bell noprint" data-a="snd" title="Sonnerie" aria-label="Sonnerie">${sndOn() ? '🔔' : '🔕'}</button>
     <div class="seg noprint"><button data-a="cur" data-v="USD" class="${S.cur === 'USD' ? 'on' : ''}">USD</button><button data-a="cur" data-v="CDF" class="${S.cur === 'CDF' ? 'on' : ''}">CDF</button></div>
     <div class="who noprint"><b>${esc(me.name)}</b><span>${ROLE[me.role]} · <a href="#" data-a="pw">Mot de passe</a> · <a href="#" data-a="logout">Quitter</a></span></div>
   </header>
@@ -310,7 +381,16 @@ function dashboard() {
   <div class="card"><h2>⚠️ Ruptures & ravitaillement</h2>${alerts.length ? alerts.slice(0, 12).map((a) => `<div class="pl"><div class="th">${pimg(a.p)}</div><div class="t"><b>${esc(a.p.name)}</b><span class="mut">${esc(a.s.name)}</span></div>${badge(a.q, a.p)}</div>`).join('') : empty('Tout est en stock 👍')}</div></div>
   <div class="card"><h2>Ventes en temps réel</h2>${D().sales.length ? D().sales.slice(-10).reverse().map((x) => `<div class="pl"><div class="t"><b>${esc((prod(x.productId) || {}).name || '?')} × ${fnum(x.qty)}${x.unit ? ' ' + esc(x.unit.toLowerCase()) : ''}</b><span class="mut">${esc(shopN(x.shopId))} · ${esc(userN(x.sellerId))} · ${hm(x.ts)}</span></div><b>${fS(mS(x, 'total'))}</b></div>`).join('') : empty('Aucune vente pour le moment.')}</div>`;
 }
-['gerant', 'patron', 'superadmin'].forEach((r) => (VIEWS[r + '|Tableau'] = dashboard));
+['gerant', 'patron'].forEach((r) => (VIEWS[r + '|Tableau'] = dashboard));
+VIEWS['superadmin|Tableau'] = () => {
+  const U = D().users, pa = U.filter((u) => u.role === 'patron'), cnt = (r, p) => U.filter((u) => u.role === r && (!p || u.patronId === p)).length;
+  const rows = pa.map((p) => {
+    const sh = D().shops.filter((s) => s.patronId === p.id).length;
+    return `<tr class="${p.active === false ? 'off' : ''}"><td><b>${esc(p.name)}</b><br><span class="mut">@${esc(p.username)}</span> ${p.active === false ? '<span class="tag out">Suspendu</span>' : ''}</td><td class="num">${sh}</td><td class="num">${cnt('gerant', p.id)}</td><td class="num">${cnt('vendeur', p.id)}</td><td><button class="btn s ${p.active === false ? '' : 'o'}" data-a="suspend" data-id="${p.id}">${p.active === false ? '▶ Réactiver' : '⏸ Suspendre'}</button></td></tr>`;
+  }).join('');
+  return `${rateCard()}<div class="kpis">${kpi('Patrons', pa.length)}${kpi('Suspendus', pa.filter((p) => p.active === false).length, pa.some((p) => p.active === false) ? 'o' : 'g')}${kpi('Boutiques', D().shops.length, 'g')}${kpi('Gérants', cnt('gerant'))}${kpi('Vendeurs', cnt('vendeur'))}${kpi('Agents', cnt('agent'), 'o')}</div>
+  <div class="card"><h2>Patrons</h2>${pa.length ? `<div class="tw"><table><tr><th>Patron</th><th class="num">Boutiques</th><th class="num">Gérants</th><th class="num">Vendeurs</th><th></th></tr>${rows}</table></div><p class="mut">Suspendre un patron bloque aussi ses gérants et ses vendeurs. Réactivez-le pour tout rétablir.</p>` : empty('Aucun patron. Créez-en un dans « Utilisateurs ».')}</div>`;
+};
 
 /* produits */
 VIEWS['gerant|Produits'] = () => `<div class="cols"><div class="card"><h2>Nouveau produit</h2>${prodForm()}</div><div class="card"><h2>Catalogue (${D().products.length})</h2>${prodRows(D().products, { edit: 1, del: 1, resupply: D().me.role === 'gerant' })}</div></div>`;
@@ -466,7 +546,8 @@ async function dlRep() {
 /* utilisateurs */
 function userRows(list) {
   if (!list.length) return empty('Aucun compte.');
-  return `<div class="tw"><table><tr><th>Nom</th><th>Rôle</th><th>Boutiques</th><th></th></tr>${list.map((u) => `<tr><td><b>${esc(u.name)}</b><br><span class="mut">@${esc(u.username)}</span></td><td><span class="tag">${ROLE[u.role]}</span></td><td>${esc(u.shopIds.map(shopN).join(', ') || '—')}</td><td><button class="btn o s" data-a="edituser" data-id="${u.id}">Modifier</button> <button class="btn d s" data-a="deluser" data-id="${u.id}">✕</button></td></tr>`).join('')}</table></div>`;
+  const st = (u) => (u.active === false ? '<span class="tag out">Suspendu</span>' : u.blocked ? '<span class="tag low">Bloqué (patron suspendu)</span>' : '');
+  return `<div class="tw"><table><tr><th>Nom</th><th>Rôle</th><th>Boutiques</th><th></th></tr>${list.map((u) => `<tr class="${u.active === false || u.blocked ? 'off' : ''}"><td><b>${esc(u.name)}</b><br><span class="mut">@${esc(u.username)}</span> ${st(u)}</td><td><span class="tag">${ROLE[u.role]}</span></td><td>${esc(u.shopIds.map(shopN).join(', ') || '—')}</td><td><button class="btn o s" data-a="edituser" data-id="${u.id}">Modifier</button> <button class="btn s ${u.active === false ? '' : 'o'}" data-a="suspend" data-id="${u.id}">${u.active === false ? '▶ Réactiver' : '⏸ Suspendre'}</button> <button class="btn d s" data-a="deluser" data-id="${u.id}">✕</button></td></tr>`).join('')}</table></div>`;
 }
 function userForm(roles) {
   const sup = D().me.role === 'superadmin';
@@ -599,6 +680,7 @@ async function doPay() {
     const low = Object.keys(r.left).map((pid) => prod(pid)).filter((p) => p && r.left[p.id] <= p.alertQty).map((p) => (r.left[p.id] <= 0 ? '⚠️ Rupture : ' : '⚠️ Stock bas : ') + p.name + ' (' + fmtBase(p, r.left[p.id]) + ')');
     S.cart = [];
     S.pay = null;
+    ring('sale');
     modal(`<div class="done"><div class="ok">✔</div><h2>Vente enregistrée</h2><div class="mut">Total encaissé</div><div class="big-total">${fN(r.total, r.cur)}</div>
     ${r.change > 0 ? `<div class="change" style="font-size:20px">Monnaie à rendre : <b>${fN(r.change, r.cur)}</b></div>` : '<div class="change">Paiement exact</div>'}
     ${low.map((t) => `<div class="warn">${esc(t)}</div>`).join('')}
@@ -692,6 +774,17 @@ document.addEventListener('click', async (e) => {
     else if (a === 'dlrep') await dlRep();
     else if (a === 'edituser') editUserModal(id);
     else if (a === 'pw') modal(`<h2>Changer mon mot de passe</h2><form data-f="pw"><label>Ancien mot de passe</label><input type="password" name="old" required><label>Nouveau (6+ caractères)</label><input type="password" name="password" minlength="6" required><button class="btn big">Enregistrer</button><button type="button" class="btn o big" data-a="mclose">Annuler</button></form>`);
+    else if (a === 'snd') {
+      localStorage.setItem('bp_snd', sndOn() ? '0' : '1');
+      if (sndOn()) { unlockAudio(); ring('msg'); const ok = await pushOn(); toast(ok ? '🔔 Alertes activées, même application fermée' : '🔔 Sonnerie activée (autorisez les notifications pour être alerté application fermée)'); }
+      else await pushOff();
+      render();
+    }
+    else if (a === 'suspend') {
+      const u = D().users.find((x) => x.id === id), stop = u.active !== false;
+      if (stop && !confirm(u.role === 'patron' ? 'Suspendre ce patron ? Ses gérants et vendeurs seront bloqués aussi.' : 'Suspendre ce compte ?')) return;
+      await api('/users/' + id, 'PUT', { active: !stop }); toast(stop ? 'Compte suspendu' : 'Compte réactivé'); await load(true);
+    }
     else if (a === 'toggle') { await api('/tasks/' + id + '/toggle', 'POST'); await load(true); }
     else if (a === 'delprod' && confirm('Supprimer ce produit et son stock ?')) { await api('/products/' + id, 'DELETE'); await load(true); }
     else if (a === 'delshop' && confirm('Supprimer cette boutique et son stock ?')) { await api('/shops/' + id, 'DELETE'); await load(true); }

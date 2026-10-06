@@ -194,3 +194,7 @@ tr:last-child td{border:0}
 body:has(.cartbar) main{padding-bottom:calc(96px + env(safe-area-inset-bottom))}
 @media(max-width:560px){.grid{grid-template-columns:repeat(3,1fr);gap:8px}.ur2{grid-template-columns:1fr 1fr}.ur2>div:last-child{grid-column:span 2}}
 #toast{bottom:calc(86px + env(safe-area-inset-bottom))}
+
+.bell{border:1px solid var(--line);background:#fff;border-radius:99px;width:36px;height:36px;font-size:17px;cursor:pointer;flex:none;padding:0}
+tr.off td{opacity:.55}tr.off td:last-child{opacity:1}
+.tag.out{background:var(--r-l);color:var(--r)}

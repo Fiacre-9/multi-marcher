@@ -1,7 +1,7 @@
 /* BoutiquePro – service worker
    - Coquille de l'application disponible hors ligne (l'écran s'ouvre même sans réseau).
    - Les appels /api ne sont JAMAIS mis en cache : les ventes et stocks restent toujours à jour et sécurisés. */
-const V = 'bp-v2';
+const V = 'bp-v4';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png', '/icons/favicon-32.png'];
 
 self.addEventListener('install', (e) => {
@@ -33,3 +33,16 @@ async function networkFirst(r) {
     return (await c.match(r)) || (r.mode === 'navigate' ? c.match('/') : Response.error());
   }
 }
+
+/* notifications push : s'affichent même application fermée */
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data && e.data.text() }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'BoutiquePro', {
+    body: d.body || '', icon: '/icons/icon-192.png', badge: '/icons/favicon-32.png', tag: d.tag || 'bp', renotify: true, vibrate: [120, 60, 120],
+  }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((l) => (l.length ? l[0].focus() : self.clients.openWindow('/'))));
+});

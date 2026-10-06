@@ -22,7 +22,7 @@ const SECRET = process.env.SESSION_SECRET || (() => {
 })();
 
 /* ---------- base de données JSON ---------- */
-let db = { settings: { rate: 2800 }, users: [], shops: [], products: [], stock: {}, sales: [], purchases: [], comments: [], tasks: [], taskDone: {}, deals: [], agentProducts: [], costs: {}, moves: [], tickets: [] };
+let db = { push: {}, settings: { rate: 2800 }, users: [], shops: [], products: [], stock: {}, sales: [], purchases: [], comments: [], tasks: [], taskDone: {}, deals: [], agentProducts: [], costs: {}, moves: [], tickets: [] };
 if (fs.existsSync(DBF)) db = Object.assign(db, JSON.parse(fs.readFileSync(DBF, 'utf8')));
 let timer = null;
 const save = () => {
@@ -174,11 +174,13 @@ const limited = (ip) => {
   return a.length >= 10;
 };
 
+const live = (u) => !!u && u.active !== false && (!u.patronId || (db.users.find((x) => x.id === u.patronId) || {}).active !== false);
 const auth = (q, s, n) => {
   const h = q.headers.authorization || '';
   const p = h.startsWith('Bearer ') ? verify(h.slice(7)) : null;
-  const u = p && db.users.find((x) => x.id === p.id && x.active);
-  if (!u) return s.status(401).json({ error: 'Session expirée' });
+  const u0 = p && db.users.find((x) => x.id === p.id);
+  const u = u0 && live(u0) ? u0 : null;
+  if (!u) return s.status(401).json({ error: u0 ? 'Compte suspendu. Contactez votre responsable.' : 'Session expirée' });
   q.u = u;
   n();
 };
@@ -211,7 +213,47 @@ const manages = (u, t) =>
     u.role === 'superadmin' ||
     (u.role === 'patron' && t.patronId === u.id && ['gerant', 'vendeur'].includes(t.role)) ||
     (u.role === 'gerant' && t.role === 'vendeur' && (t.shopIds || []).some((s) => (u.shopIds || []).includes(s))));
-const pub = (u) => ({ id: u.id, name: u.name, username: u.username, role: u.role, patronId: u.patronId || null, shopIds: u.shopIds || [], active: u.active });
+/* ---------- notifications push (téléphone verrouillé / application fermée) ---------- */
+let WP = null;
+try { WP = require('web-push'); } catch { console.log('[BoutiquePro] web-push absent : notifications push désactivées (npm install).'); }
+if (WP) {
+  if (!db.settings.vapid) { db.settings.vapid = WP.generateVAPIDKeys(); flush(); }
+  WP.setVapidDetails('mailto:' + (process.env.CONTACT_EMAIL || 'contact@mireb.online'), db.settings.vapid.publicKey, db.settings.vapid.privateKey);
+}
+function pushTo(ids, payload) {
+  if (!WP) return;
+  const body = JSON.stringify(payload);
+  for (const id of new Set(ids)) {
+    const u = db.users.find((x) => x.id === id);
+    if (!u || !live(u)) continue;
+    for (const sub of (db.push[id] || []).slice()) {
+      WP.sendNotification(sub, body, { TTL: 3600 }).catch((e) => {
+        if (e && (e.statusCode === 404 || e.statusCode === 410)) { db.push[id] = (db.push[id] || []).filter((x) => x.endpoint !== sub.endpoint); save(); }
+      });
+    }
+  }
+}
+const teamOf = (shopId, roles) => {
+  const sh = db.shops.find((x) => x.id === shopId);
+  return db.users.filter((x) => roles.includes(x.role) && (x.role === 'patron' ? sh && x.id === sh.patronId : (x.shopIds || []).includes(shopId))).map((x) => x.id);
+};
+route('get', '/api/push/key', null, () => ({ key: WP ? db.settings.vapid.publicKey : '' }));
+route('post', '/api/push/sub', null, (q) => {
+  const s = q.body && q.body.subscription;
+  if (!WP || !s || !/^https:\/\//.test(String(s.endpoint || '')) || !s.keys) bad('Abonnement invalide');
+  for (const k in db.push) db.push[k] = db.push[k].filter((x) => x.endpoint !== s.endpoint);
+  (db.push[q.u.id] = db.push[q.u.id] || []).push({ endpoint: s.endpoint, keys: { p256dh: String(s.keys.p256dh), auth: String(s.keys.auth) } });
+  db.push[q.u.id] = db.push[q.u.id].slice(-5);
+  save();
+  return { ok: true };
+});
+route('post', '/api/push/off', null, (q) => {
+  const e = q.body && q.body.endpoint;
+  for (const k in db.push) db.push[k] = db.push[k].filter((x) => x.endpoint !== e);
+  save();
+  return { ok: true };
+});
+const pub = (u) => ({ id: u.id, name: u.name, username: u.username, role: u.role, patronId: u.patronId || null, shopIds: u.shopIds || [], active: u.active, blocked: u.active !== false && !live(u) });
 
 const commission = (a) => {
   const d = db.deals.filter((x) => x.agentId === a.id);
@@ -224,7 +266,8 @@ const commission = (a) => {
 app.post('/api/login', (q, s) => {
   const ip = q.ip;
   if (limited(ip)) return s.status(429).json({ error: 'Trop de tentatives. Réessayez dans 15 minutes.' });
-  const u = db.users.find((x) => x.username === str(q.body.username, 40).toLowerCase() && x.active);
+  const u = db.users.find((x) => x.username === str(q.body.username, 40).toLowerCase());
+  if (u && checkPw(String(q.body.password || ''), u.hash) && !live(u)) return s.status(403).json({ error: 'Compte suspendu. Contactez votre responsable.' });
   if (!u || !checkPw(String(q.body.password || ''), u.hash)) {
     tries.get(ip).push(Date.now());
     return s.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
@@ -254,15 +297,15 @@ route('get', '/api/data', null, (q) => {
   else if (u.role === 'gerant') users = db.users.filter((x) => x.role === 'vendeur' && (x.shopIds || []).some((s) => ids.has(s)));
   let sales = db.sales.filter((x) => ids.has(x.shopId));
   if (vend) sales = sales.filter((x) => x.date === day());
-  const money = !vend && u.role !== 'agent';
+  const money = !vend && u.role !== 'agent' && u.role !== 'superadmin';
   const pid = u.role === 'patron' ? u.id : u.patronId;
   const costs = {};
   if (money) for (const k in db.costs) if (ids.has(k.split('|')[0])) costs[k] = db.costs[k];
-  const tickets = (u.role === 'agent' ? [] : db.tickets.filter((x) => ids.has(x.shopId) && (!vend || x.date === day()))).slice(vend ? -40 : -300);
+  const tickets = (u.role === 'agent' || u.role === 'superadmin' ? [] : db.tickets.filter((x) => ids.has(x.shopId) && (!vend || x.date === day()))).slice(vend ? -40 : -300);
   const out = {
     costs, tickets,
     me: pub(u), rate: db.settings.rate, today: day(), shops, products, stock, users: users.map(pub),
-    sales: money ? sales.slice(-800) : vend ? sales.slice(-60).map(({ costUSD, costCDF, ...r }) => r) : [],
+    sales: money ? sales.slice(-800) : u.role === 'superadmin' ? [] : vend ? sales.slice(-60).map(({ costUSD, costCDF, ...r }) => r) : [],
     purchases: money ? db.purchases.filter((x) => ids.has(x.shopId)).slice(-300) : [],
     comments: u.role === 'agent' ? [] : db.comments.filter((x) => ids.has(x.shopId)).slice(-200),
     tasks: db.tasks.filter((t) => (u.role === 'superadmin' ? true : t.patronId === pid)),
@@ -605,11 +648,12 @@ route('post', '/api/sales', ['vendeur', 'gerant'], (q) => {
     if (left[pid] <= p.alertQty) {
       const text = (left[pid] <= 0 ? '⚠️ RUPTURE : ' : '⚠️ Stock bas (' + fmtBase(p, left[pid]) + ') : ') + p.name;
       const last = db.comments.filter((c) => c.shopId === sh.id && c.auto).pop();
-      if (!last || last.text !== text) db.comments.push({ id: uid(), shopId: sh.id, from: 'Système', role: 'system', auto: true, text, ts: Date.now() });
+      if (!last || last.text !== text) { db.comments.push({ id: uid(), shopId: sh.id, from: 'Système', role: 'system', auto: true, text, ts: Date.now() }); pushTo(teamOf(sh.id, ['gerant', 'patron']), { title: '⚠️ Stock bas · ' + sh.name, body: text, tag: 'stock' }); }
     }
   }
   save();
   const strip = u.role === 'vendeur' ? out.map(({ costUSD, costCDF, ...r }) => r) : out;
+  pushTo(teamOf(sh.id, ['gerant', 'patron']).filter((x) => x !== u.id), { title: '💰 Nouvelle vente · ' + sh.name, body: u.name + ' : ' + (pay === 'CDF' ? Math.round(total).toLocaleString('fr-FR') + ' FC' : total.toFixed(2) + ' $'), tag: 'sale' });
   return { ticket, cur: pay, total, received, change, sales: strip, left };
 });
 
@@ -639,6 +683,7 @@ route('post', '/api/comments', ['superadmin', 'patron', 'gerant', 'vendeur'], (q
   db.comments.push({ id: uid(), shopId: sh.id, from: q.u.name, role: q.u.role, text, ts: Date.now() });
   if (db.comments.length > 5000) db.comments = db.comments.slice(-3000);
   save();
+  pushTo(teamOf(sh.id, ['gerant', 'patron', 'vendeur']).filter((x) => x !== q.u.id), { title: '💬 ' + q.u.name + ' · ' + sh.name, body: text, tag: 'msg' });
   return { ok: true };
 });
 
@@ -649,6 +694,7 @@ route('post', '/api/tasks', ['superadmin', 'patron', 'gerant'], (q) => {
   if (!str(q.body.text)) bad('Texte requis');
   db.tasks.push({ id: uid(), patronId, text: str(q.body.text, 200) });
   save();
+  pushTo(db.users.filter((x) => ['gerant', 'vendeur'].includes(x.role) && x.patronId === patronId && x.id !== q.u.id).map((x) => x.id), { title: '📋 Nouvelle tâche', body: str(q.body.text, 200), tag: 'task' });
   return { ok: true };
 });
 route('delete', '/api/tasks/:id', ['superadmin', 'patron', 'gerant'], (q) => {
@@ -784,7 +830,7 @@ function buildReport(u, qr) {
     stock,
   };
 }
-route('get', '/api/report', ['superadmin', 'patron', 'gerant'], (q) => buildReport(q.u, q.query));
+route('get', '/api/report', ['patron', 'gerant'], (q) => buildReport(q.u, q.query));
 
 /* export Excel : un type de rapport au choix, ou le classeur général (toutes les feuilles) */
 function reportSheets(r, type, cur) {
@@ -844,7 +890,7 @@ function reportSheets(r, type, cur) {
   const sets = { general: ['resume', 'boutiques', 'produits', 'jours', 'vendeurs', 'ventes', 'achats', 'stock'], produits: ['produits', 'stock'] };
   return (sets[type] || [type in L ? type : 'resume']).map((k) => L[k]());
 }
-route('get', '/api/report.xlsx', ['superadmin', 'patron', 'gerant'], (q, s) => {
+route('get', '/api/report.xlsx', ['patron', 'gerant'], (q, s) => {
   const r = buildReport(q.u, q.query);
   const type = str(q.query.type, 12) || 'general';
   const buf = buildXlsx(reportSheets(r, type, q.query.cur === 'CDF' ? 'CDF' : 'USD'));
